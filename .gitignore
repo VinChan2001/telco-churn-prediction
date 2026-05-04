@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Accidental outputs generated outside the project structure.
+data/scored_churn_customers.csv
+data/risk_segment_summary.csv
+notebooks/*.joblib
