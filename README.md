@@ -59,14 +59,30 @@ telco-churn-prediction/
 │   │   └── Telco_customer_churn.xlsx
 │   └── processed/
 │       ├── scored_churn_customers.csv
-│       └── risk_segment_summary.csv
+│       ├── risk_segment_summary.csv
+│       ├── model_metrics.csv
+│       ├── shap_feature_importance.csv
+│       ├── sample_inference_customers.csv
+│       └── synthetic_new_customers.csv
 ├── models/
 │   └── xgb_churn_pipeline.joblib
 ├── notebooks/
 │   └── 01_churn_modeling_and_roi.ipynb
 ├── src/
 │   ├── config.py
-│   └── score_customers.py
+│   ├── train_model.py
+│   ├── score_customers.py
+│   └── generate_synthetic_customers.py
+├── Makefile
 ├── README.md
 ├── requirements.txt
 └── .gitignore
+```
+
+## Run Full Local Pipeline
+
+From the project root:
+
+```bash
+make pipeline
+```
