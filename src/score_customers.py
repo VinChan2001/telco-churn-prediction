@@ -2,7 +2,7 @@ import joblib
 import pandas as pd
 
 from config import (
-    RAW_DATA_PATH,
+    SYNTHETIC_CUSTOMERS_PATH,
     MODEL_PATH,
     SCORED_CUSTOMERS_PATH,
     RISK_SEGMENT_SUMMARY_PATH,
@@ -11,31 +11,14 @@ from config import (
 
 
 def load_data():
-    """Load raw customer data."""
-    df = pd.read_excel(RAW_DATA_PATH)
+    """Load new customer data for inference."""
+    df = pd.read_csv(SYNTHETIC_CUSTOMERS_PATH)
     return df
 
 
 def prepare_features(df):
-    """Prepare model input features by removing columns not used for prediction."""
-    columns_to_drop = [
-        "CustomerID",
-        "Count",
-        "Country",
-        "State",
-        "City",
-        "Zip Code",
-        "Lat Long",
-        "Latitude",
-        "Longitude",
-        "Churn Label",
-        "Churn Value",
-        "Churn Score",
-        "CLTV",
-        "Churn Reason",
-    ]
-
-    X = df.drop(columns=columns_to_drop, errors="ignore")
+    """Prepare model input features for inference."""
+    X = df.copy()
 
     X["Total Charges"] = pd.to_numeric(X["Total Charges"], errors="coerce")
 
