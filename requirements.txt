@@ -9,3 +9,5 @@ streamlit
 shap
 Faker
 google-cloud-storage
+Flask
+gunicorn
