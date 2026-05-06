@@ -86,3 +86,39 @@ From the project root:
 ```bash
 make pipeline
 ```
+
+## Cloud Synthetic Customer Generation
+
+This project includes a Cloud Run service that generates synthetic telco customer records using Faker and uploads them to Google Cloud Storage.
+
+### Flow
+
+```text
+HTTP request to Cloud Run
+        ↓
+Faker generates synthetic customer records
+        ↓
+CSV is temporarily written inside the container
+        ↓
+CSV is uploaded to Google Cloud Storage
+        ↓
+Files land in gs://telco-churn-vinay-2026/incoming/
+```
+
+## Automated Synthetic Data Ingestion
+
+This project includes an automated cloud ingestion workflow that simulates new telco customer records arriving on a schedule.
+
+### Architecture
+
+```text
+Cloud Scheduler
+        ↓ every 6 hours
+Cloud Run Faker service
+        ↓
+Generates synthetic customer records
+        ↓
+Uploads timestamped CSV files to Google Cloud Storage
+        ↓
+gs://telco-churn-vinay-2026/incoming/
+```
