@@ -1,0 +1,21 @@
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      [
+        "build",
+        "-f",
+        "Dockerfile.bq-loader",
+        "-t",
+        "us-east1-docker.pkg.dev/telco-churn-vinay-raw/cloud-run-source-deploy/telco-bq-loader-service:latest",
+        "."
+      ]
+
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      [
+        "push",
+        "us-east1-docker.pkg.dev/telco-churn-vinay-raw/cloud-run-source-deploy/telco-bq-loader-service:latest"
+      ]
+
+images:
+  - "us-east1-docker.pkg.dev/telco-churn-vinay-raw/cloud-run-source-deploy/telco-bq-loader-service:latest"
