@@ -11,3 +11,4 @@ Faker
 google-cloud-storage
 Flask
 gunicorn
+google-cloud-bigquery
