@@ -21,6 +21,9 @@ The project currently includes:
 - Saved XGBoost model artifact
 - Batch scoring script
 - Dashboard-ready scored customer outputs
+- Cloud Run synthetic customer generation
+- Google Cloud Storage ingestion landing zone
+- BigQuery CSV loading workflow
 
 ## Selected Model
 
@@ -72,8 +75,15 @@ telco-churn-prediction/
 │   ├── config.py
 │   ├── train_model.py
 │   ├── score_customers.py
-│   └── generate_synthetic_customers.py
+│   ├── generate_synthetic_customers.py
+│   ├── cloud_run_faker_app.py
+│   ├── bq_loader.py
+│   ├── cloud_run_bq_loader_app.py
+│   └── load_latest_to_bigquery.py
 ├── Makefile
+├── Dockerfile
+├── Dockerfile.bq-loader
+├── cloudbuild-bq-loader.yaml
 ├── README.md
 ├── requirements.txt
 └── .gitignore
@@ -89,25 +99,7 @@ make pipeline
 
 ## Cloud Synthetic Customer Generation
 
-This project includes a Cloud Run service that generates synthetic telco customer records using Faker and uploads them to Google Cloud Storage.
-
-### Flow
-
-```text
-HTTP request to Cloud Run
-        ↓
-Faker generates synthetic customer records
-        ↓
-CSV is temporarily written inside the container
-        ↓
-CSV is uploaded to Google Cloud Storage
-        ↓
-Files land in gs://telco-churn-vinay-2026/incoming/
-```
-
-## Automated Synthetic Data Ingestion
-
-This project includes an automated cloud ingestion workflow that simulates new telco customer records arriving on a schedule.
+This project includes an automated Cloud Run workflow that simulates new telco customer records arriving on a schedule.
 
 ### Architecture
 
@@ -121,4 +113,30 @@ Generates synthetic customer records
 Uploads timestamped CSV files to Google Cloud Storage
         ↓
 gs://telco-churn-vinay-2026/incoming/
+```
+
+## BigQuery Batch Loader
+
+This project also includes a BigQuery loader that appends generated CSV files from Cloud Storage into:
+
+```text
+telco-churn-vinay-raw.telco_churn.synthetic_customers
+```
+
+### Loader Flow
+
+```text
+CSV file lands in Cloud Storage
+        ↓
+Cloud Run BigQuery loader receives the object event
+        ↓
+Loads the CSV with schema autodetection
+        ↓
+Rows are appended to the BigQuery synthetic_customers table
+```
+
+For a manual backfill or one-off load, run:
+
+```bash
+python -m src.load_latest_to_bigquery
 ```
