@@ -1,5 +1,7 @@
 from google.cloud import bigquery
 
+from src.bq_model_input import MODEL_INPUT_TABLE_ID, refresh_model_input_table
+
 
 LOADED_FILES_TABLE_ID = "telco-churn-vinay-raw.telco_churn.loaded_files"
 
@@ -65,12 +67,15 @@ def load_gcs_csv_to_bigquery(
     2. Reuses the existing BigQuery table schema instead of autodetecting every file.
     3. Appends rows only after schema validation succeeds.
     4. Records successfully loaded files in loaded_files.
+    5. Refreshes the model input table used for future inference.
     """
 
     client = bigquery.Client()
 
     if has_file_already_loaded(client, gcs_uri):
         print(f"Skipped {gcs_uri}. File was already loaded.")
+        refresh_model_input_table(client)
+        print(f"Refreshed model input table: {MODEL_INPUT_TABLE_ID}")
         return
 
     table_before = client.get_table(table_id)
@@ -107,6 +112,9 @@ def load_gcs_csv_to_bigquery(
         row_count=loaded_row_count,
     )
 
+    refresh_model_input_table(client)
+
     print(f"Loaded {gcs_uri} into {table_id}")
     print(f"Rows loaded from this file: {loaded_row_count}")
     print(f"Table now has {rows_after} rows")
+    print(f"Refreshed model input table: {MODEL_INPUT_TABLE_ID}")

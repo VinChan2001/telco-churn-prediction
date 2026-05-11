@@ -200,6 +200,8 @@ Cloud Run BigQuery loader service
         ↓
 Loads new CSV rows into BigQuery
         ↓
+Refreshes model-ready BigQuery input table
+        ↓
 BigQuery table is ready for SQL analysis / future scoring
 ```
 
@@ -218,6 +220,7 @@ BigQuery table is ready for SQL analysis / future scoring
 | Eventarc Trigger | `telco-gcs-to-bq-loader` |
 | BigQuery Dataset | `telco_churn` |
 | BigQuery Main Table | `synthetic_customers` |
+| BigQuery Model Input Table | `synthetic_customers_model_input` |
 | BigQuery Metadata Table | `loaded_files` |
 
 ---
@@ -329,13 +332,21 @@ Main table:
 telco-churn-vinay-raw.telco_churn.synthetic_customers
 ```
 
+Model input table:
+
+```text
+telco-churn-vinay-raw.telco_churn.synthetic_customers_model_input
+```
+
 Metadata table:
 
 ```text
 telco-churn-vinay-raw.telco_churn.loaded_files
 ```
 
-The `synthetic_customers` table stores customer records loaded from GCS.
+The `synthetic_customers` table stores customer records loaded from GCS. This is the raw ingestion table.
+
+The `synthetic_customers_model_input` table stores the 19 raw feature columns expected by the saved scikit-learn/XGBoost pipeline. It converts BigQuery boolean values back into the model's `Yes`/`No` string categories and normalizes service-dependent values such as `No phone service` and `No internet service`.
 
 The `loaded_files` table tracks which files have already been processed so the loader does not append duplicate rows. It stores:
 
@@ -367,9 +378,11 @@ if file was already loaded, skip
 if new file, append rows to BigQuery
         ↓
 record file_uri in loaded_files
+        ↓
+refresh synthetic_customers_model_input
 ```
 
-This protects against accidental duplicate loading.
+This protects against accidental duplicate loading and keeps the model input table current.
 
 ---
 
@@ -390,6 +403,12 @@ python -m src.load_latest_to_bigquery
 This script finds the latest CSV file in the GCS `incoming/` folder and loads it into BigQuery.
 
 This is useful for manual backfills or testing.
+
+Refresh only the model input table:
+
+```bash
+python -m src.refresh_bq_model_input_table
+```
 
 ---
 
@@ -543,6 +562,14 @@ FROM `telco-churn-vinay-raw.telco_churn.loaded_files`
 ORDER BY loaded_at DESC;
 ```
 
+View model-ready inference input:
+
+```sql
+SELECT *
+FROM `telco-churn-vinay-raw.telco_churn.synthetic_customers_model_input`
+LIMIT 10;
+```
+
 ---
 
 ## Deployment Commands
@@ -607,6 +634,8 @@ Eventarc
 Cloud Run BigQuery loader
         ↓
 BigQuery synthetic_customers table
+        ↓
+BigQuery synthetic_customers_model_input table
 ```
 
 Together, these make the project more realistic than a notebook-only churn model.
@@ -618,7 +647,7 @@ Together, these make the project more realistic than a notebook-only churn model
 Planned next steps:
 
 - Add ingestion metadata columns such as `source_file` and `ingested_at`
-- Clean column names for BigQuery, for example `Internet Service` → `internet_service`
+- Add a separate snake_case analytics view if downstream tools need standard SQL identifiers
 - Add automated scoring from BigQuery records
 - Save scored records into a BigQuery `scored_customers` table
 - Connect Streamlit dashboard to BigQuery or exported scored outputs
