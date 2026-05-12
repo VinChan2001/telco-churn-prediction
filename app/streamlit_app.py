@@ -1,5 +1,8 @@
+import os
+
 import pandas as pd
 import streamlit as st
+from google.cloud import bigquery
 
 
 st.set_page_config(
@@ -10,12 +13,46 @@ st.set_page_config(
 
 @st.cache_data
 def load_data():
-    scored_customers = pd.read_csv("data/processed/scored_churn_customers.csv")
-    risk_summary = pd.read_csv("data/processed/risk_segment_summary.csv")
+    scored_customers = load_scored_customers()
+    risk_summary = create_risk_summary(scored_customers)
     model_metrics = pd.read_csv("data/processed/model_metrics.csv")
     shap_importance = pd.read_csv("data/processed/shap_feature_importance.csv")
 
     return scored_customers, risk_summary, model_metrics, shap_importance
+
+
+def load_scored_customers():
+    if os.getenv("DASHBOARD_DATA_SOURCE", "bigquery").lower() == "local":
+        return pd.read_csv("data/processed/scored_churn_customers.csv")
+
+    try:
+        client = bigquery.Client()
+        query = """
+        SELECT *
+        FROM `telco-churn-vinay-raw.telco_churn.scored_customers`
+        ORDER BY scored_at DESC, churn_probability DESC
+        """
+        rows = client.query(query).result()
+        records = [dict(row) for row in rows]
+
+        if records:
+            return pd.DataFrame(records)
+
+    except Exception:
+        pass
+
+    return pd.read_csv("data/processed/scored_churn_customers.csv")
+
+
+def create_risk_summary(scored_customers):
+    summary = scored_customers.groupby("risk_segment", observed=True).agg(
+        customer_count=("risk_segment", "count"),
+        avg_churn_probability=("churn_probability", "mean"),
+        total_estimated_annual_revenue=("estimated_annual_revenue", "sum"),
+        avg_monthly_charges=("Monthly Charges", "mean"),
+    ).reset_index()
+
+    return summary
 
 
 scored_customers, risk_summary, model_metrics, shap_importance = load_data()
@@ -49,7 +86,8 @@ risk_order = ["Low Risk", "Medium Risk", "High Risk"]
 risk_count_chart = (
     risk_summary
     .set_index("risk_segment")
-    .loc[risk_order, "customer_count"]
+    .reindex(risk_order)["customer_count"]
+    .fillna(0)
 )
 
 st.bar_chart(risk_count_chart)
@@ -68,17 +106,26 @@ if selected_segment != "All":
 else:
     filtered_customers = scored_customers
 
+customer_columns = [
+    "churn_probability",
+    "predicted_churn",
+    "risk_segment",
+    "Monthly Charges",
+    "estimated_annual_revenue",
+    "source_file",
+    "scored_at",
+]
+customer_columns = [
+    column for column in customer_columns
+    if column in filtered_customers.columns
+]
+
 st.dataframe(
-    filtered_customers[
-        [
-            "churn_probability",
-            "predicted_churn",
-            "risk_segment",
-            "Monthly Charges",
-            "estimated_annual_revenue",
-        ]
-    ].sort_values("churn_probability", ascending=False),
-    use_container_width=True
+    filtered_customers[customer_columns].sort_values(
+        "churn_probability",
+        ascending=False,
+    ),
+    use_container_width=True,
 )
 
 st.header("Business Impact Summary")
@@ -131,17 +178,23 @@ top_at_risk = scored_customers.sort_values(
     ascending=False
 ).head(top_n)
 
+top_at_risk_columns = [
+    "churn_probability",
+    "risk_segment",
+    "Monthly Charges",
+    "estimated_annual_revenue",
+    "predicted_churn",
+    "source_file",
+    "scored_at",
+]
+top_at_risk_columns = [
+    column for column in top_at_risk_columns
+    if column in top_at_risk.columns
+]
+
 st.dataframe(
-    top_at_risk[
-        [
-            "churn_probability",
-            "risk_segment",
-            "Monthly Charges",
-            "estimated_annual_revenue",
-            "predicted_churn",
-        ]
-    ],
-    use_container_width=True
+    top_at_risk[top_at_risk_columns],
+    use_container_width=True,
 )
 
 st.header("Top 20% High-Risk Targeting Scenario")

@@ -55,6 +55,10 @@ The project currently includes:
 - Cloud Run BigQuery loader service
 - Eventarc trigger from GCS to the BigQuery loader service
 - Duplicate protection using a BigQuery `loaded_files` metadata table
+- BigQuery model-ready input table
+- BigQuery scored customer table
+- Scoring idempotency using a BigQuery `scored_files` metadata table
+- Cloud Run scorer service
 
 ---
 
@@ -123,12 +127,19 @@ telco-churn-prediction/
 │   ├── gcs_utils.py
 │   ├── cloud_run_faker_app.py
 │   ├── bq_loader.py
+│   ├── bq_model_input.py
+│   ├── bq_scorer.py
 │   ├── cloud_run_bq_loader_app.py
+│   ├── cloud_run_scorer_app.py
+│   ├── score_bq_customers.py
+│   ├── refresh_bq_model_input_table.py
 │   └── load_latest_to_bigquery.py
 ├── Makefile
 ├── Dockerfile
 ├── Dockerfile.bq-loader
+├── Dockerfile.scorer
 ├── cloudbuild-bq-loader.yaml
+├── cloudbuild-scorer.yaml
 ├── README.md
 ├── requirements.txt
 └── .gitignore
@@ -202,7 +213,9 @@ Loads new CSV rows into BigQuery
         ↓
 Refreshes model-ready BigQuery input table
         ↓
-BigQuery table is ready for SQL analysis / future scoring
+Scores unscored files with saved XGBoost pipeline
+        ↓
+Writes scored customers and scored file metadata to BigQuery
 ```
 
 ---
@@ -216,12 +229,15 @@ BigQuery table is ready for SQL analysis / future scoring
 | GCS Landing Folder | `incoming/` |
 | Cloud Run Service 1 | `telco-faker-service` |
 | Cloud Run Service 2 | `telco-bq-loader-service` |
+| Cloud Run Service 3 | `telco-bq-scorer-service` |
 | Cloud Scheduler Job | `telco-faker-every-6-hours` |
 | Eventarc Trigger | `telco-gcs-to-bq-loader` |
 | BigQuery Dataset | `telco_churn` |
 | BigQuery Main Table | `synthetic_customers` |
 | BigQuery Model Input Table | `synthetic_customers_model_input` |
-| BigQuery Metadata Table | `loaded_files` |
+| BigQuery Scored Table | `scored_customers` |
+| BigQuery Loaded Metadata Table | `loaded_files` |
+| BigQuery Scored Metadata Table | `scored_files` |
 
 ---
 
@@ -338,15 +354,29 @@ Model input table:
 telco-churn-vinay-raw.telco_churn.synthetic_customers_model_input
 ```
 
-Metadata table:
+Scored customers table:
+
+```text
+telco-churn-vinay-raw.telco_churn.scored_customers
+```
+
+Loaded-file metadata table:
 
 ```text
 telco-churn-vinay-raw.telco_churn.loaded_files
 ```
 
-The `synthetic_customers` table stores customer records loaded from GCS. This is the raw ingestion table.
+Scored-file metadata table:
 
-The `synthetic_customers_model_input` table stores the 19 raw feature columns expected by the saved scikit-learn/XGBoost pipeline. It converts BigQuery boolean values back into the model's `Yes`/`No` string categories and normalizes service-dependent values such as `No phone service` and `No internet service`.
+```text
+telco-churn-vinay-raw.telco_churn.scored_files
+```
+
+The `synthetic_customers` table stores customer records loaded from GCS. This is the raw ingestion table and includes `source_file`, `ingested_at`, and `load_id` metadata for traceability.
+
+The `synthetic_customers_model_input` table stores the raw feature columns expected by the saved scikit-learn/XGBoost pipeline plus ingestion metadata. It converts BigQuery boolean values back into the model's `Yes`/`No` string categories and normalizes service-dependent values such as `No phone service` and `No internet service`.
+
+The `scored_customers` table stores churn probabilities, churn predictions, risk segments, estimated annual revenue, `scored_at`, and source metadata.
 
 The `loaded_files` table tracks which files have already been processed so the loader does not append duplicate rows. It stores:
 
@@ -355,6 +385,8 @@ The `loaded_files` table tracks which files have already been processed so the l
 | `file_uri` | Full GCS URI for the loaded CSV file |
 | `loaded_at` | Timestamp when the file was recorded as loaded |
 | `row_count` | Number of rows appended from that file |
+
+The `scored_files` table tracks which source files have already been scored so the scorer does not write duplicate scored rows.
 
 ---
 
@@ -380,9 +412,13 @@ if new file, append rows to BigQuery
 record file_uri in loaded_files
         ↓
 refresh synthetic_customers_model_input
+        ↓
+score files not present in scored_files
+        ↓
+write scored_customers and scored_files
 ```
 
-This protects against accidental duplicate loading and keeps the model input table current.
+This protects against accidental duplicate loading, keeps the model input table current, and scores each source file once.
 
 ---
 
@@ -408,6 +444,12 @@ Refresh only the model input table:
 
 ```bash
 python -m src.refresh_bq_model_input_table
+```
+
+Score all unscored BigQuery model-input rows:
+
+```bash
+python -m src.score_bq_customers
 ```
 
 ---
@@ -453,6 +495,48 @@ Expected response:
   "service": "telco-bq-loader",
   "status": "ok"
 }
+```
+
+---
+
+## Cloud Run Scorer Service
+
+The scorer service runs the saved model artifact against unscored rows in BigQuery and writes scored outputs back to BigQuery.
+
+Service:
+
+```text
+telco-bq-scorer-service
+```
+
+Main app file:
+
+```text
+src/cloud_run_scorer_app.py
+```
+
+Dockerfile:
+
+```text
+Dockerfile.scorer
+```
+
+Cloud Build config:
+
+```text
+cloudbuild-scorer.yaml
+```
+
+Health check:
+
+```text
+https://telco-bq-scorer-service-516325234883.us-east1.run.app/
+```
+
+Run scoring:
+
+```text
+https://telco-bq-scorer-service-516325234883.us-east1.run.app/score
 ```
 
 ---
@@ -570,6 +654,29 @@ FROM `telco-churn-vinay-raw.telco_churn.synthetic_customers_model_input`
 LIMIT 10;
 ```
 
+View scored customers:
+
+```sql
+SELECT
+  churn_probability,
+  predicted_churn,
+  risk_segment,
+  estimated_annual_revenue,
+  source_file,
+  scored_at
+FROM `telco-churn-vinay-raw.telco_churn.scored_customers`
+ORDER BY churn_probability DESC
+LIMIT 10;
+```
+
+View scored files:
+
+```sql
+SELECT *
+FROM `telco-churn-vinay-raw.telco_churn.scored_files`
+ORDER BY scored_at DESC;
+```
+
 ---
 
 ## Deployment Commands
@@ -594,6 +701,21 @@ Deploy BigQuery loader service:
 ```bash
 gcloud run deploy telco-bq-loader-service \
   --image us-east1-docker.pkg.dev/telco-churn-vinay-raw/cloud-run-source-deploy/telco-bq-loader-service:latest \
+  --region us-east1 \
+  --allow-unauthenticated
+```
+
+Build scorer image:
+
+```bash
+gcloud builds submit --config cloudbuild-scorer.yaml .
+```
+
+Deploy scorer service:
+
+```bash
+gcloud run deploy telco-bq-scorer-service \
+  --image us-east1-docker.pkg.dev/telco-churn-vinay-raw/cloud-run-source-deploy/telco-bq-scorer-service:latest \
   --region us-east1 \
   --allow-unauthenticated
 ```
@@ -636,6 +758,12 @@ Cloud Run BigQuery loader
 BigQuery synthetic_customers table
         ↓
 BigQuery synthetic_customers_model_input table
+        ↓
+Cloud Run scorer / BigQuery scoring utility
+        ↓
+BigQuery scored_customers table
+        ↓
+Streamlit dashboard
 ```
 
 Together, these make the project more realistic than a notebook-only churn model.
@@ -646,21 +774,31 @@ Together, these make the project more realistic than a notebook-only churn model
 
 Planned next steps:
 
-- Add ingestion metadata columns such as `source_file` and `ingested_at`
 - Add a separate snake_case analytics view if downstream tools need standard SQL identifiers
-- Add automated scoring from BigQuery records
-- Save scored records into a BigQuery `scored_customers` table
-- Connect Streamlit dashboard to BigQuery or exported scored outputs
 - Add tests for key utility functions
 - Add CI/CD checks for formatting and basic pipeline validation
 
 ### Latest Validation
 
-After adding duplicate protection and replacing BigQuery schema autodetection with the existing table schema, the deployed Eventarc-triggered loader was tested successfully.
+After adding row-level ingestion metadata, model-input refresh, and BigQuery scoring, the deployed Eventarc-triggered loader was tested successfully.
 
 Validation result:
 
 ```text
-Before test: 90 rows
-After triggering Cloud Run Faker: 100 rows
+synthetic_customers rows: 263
+synthetic_customers_model_input rows: 263
+scored_customers rows: 263
+scored_files rows: 1
+invalid model-input service combinations: 0
+```
+
+The latest live Cloud Run test generated a new two-row GCS file and confirmed that ingestion, model-input refresh, scoring, and scoring idempotency stayed aligned:
+
+```text
+synthetic_customers rows: 267
+synthetic_customers_model_input rows: 267
+scored_customers rows: 267
+scored_files rows: 3
+latest generated file: gs://telco-churn-vinay-2026/incoming/synthetic_new_customers_20260512_043838.csv
+scorer idempotency check: 0 rows scored on rerun
 ```
