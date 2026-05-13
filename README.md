@@ -138,8 +138,10 @@ telco-churn-prediction/
 ├── Dockerfile
 ├── Dockerfile.bq-loader
 ├── Dockerfile.scorer
+├── Dockerfile.dashboard
 ├── cloudbuild-bq-loader.yaml
 ├── cloudbuild-scorer.yaml
+├── cloudbuild-dashboard.yaml
 ├── README.md
 ├── requirements.txt
 └── .gitignore
@@ -163,13 +165,25 @@ This runs the local pipeline for model training/scoring artifacts depending on t
 
 The project includes a Streamlit dashboard for viewing churn-risk outputs and business-facing summaries.
 
+Deployed dashboard:
+
+```text
+https://telco-churn-dashboard-service-aecec5bsxa-ue.a.run.app
+```
+
 Run locally with:
 
 ```bash
 streamlit run app/streamlit_app.py
 ```
 
-The dashboard is designed to consume processed outputs such as:
+By default, the dashboard reads from BigQuery:
+
+```text
+telco-churn-vinay-raw.telco_churn.scored_customers
+```
+
+If BigQuery access fails, it falls back to local processed outputs such as:
 
 ```text
 data/processed/scored_churn_customers.csv
@@ -230,6 +244,7 @@ Writes scored customers and scored file metadata to BigQuery
 | Cloud Run Service 1 | `telco-faker-service` |
 | Cloud Run Service 2 | `telco-bq-loader-service` |
 | Cloud Run Service 3 | `telco-bq-scorer-service` |
+| Cloud Run Service 4 | `telco-churn-dashboard-service` |
 | Cloud Scheduler Job | `telco-faker-every-6-hours` |
 | Eventarc Trigger | `telco-gcs-to-bq-loader` |
 | BigQuery Dataset | `telco_churn` |
@@ -541,6 +556,42 @@ https://telco-bq-scorer-service-516325234883.us-east1.run.app/score
 
 ---
 
+## Cloud Run Dashboard Service
+
+The dashboard service hosts the Streamlit dashboard from `app/streamlit_app.py` and reads scored churn predictions from BigQuery.
+
+Service:
+
+```text
+telco-churn-dashboard-service
+```
+
+Dashboard URL:
+
+```text
+https://telco-churn-dashboard-service-aecec5bsxa-ue.a.run.app
+```
+
+Dockerfile:
+
+```text
+Dockerfile.dashboard
+```
+
+Cloud Build config:
+
+```text
+cloudbuild-dashboard.yaml
+```
+
+Health check:
+
+```text
+https://telco-churn-dashboard-service-aecec5bsxa-ue.a.run.app/_stcore/health
+```
+
+---
+
 ## Eventarc Trigger
 
 Eventarc connects GCS object creation events to the BigQuery loader service.
@@ -720,6 +771,26 @@ gcloud run deploy telco-bq-scorer-service \
   --allow-unauthenticated
 ```
 
+Build dashboard image:
+
+```bash
+gcloud builds submit --config cloudbuild-dashboard.yaml .
+```
+
+Deploy dashboard service:
+
+```bash
+gcloud run deploy telco-churn-dashboard-service \
+  --image us-east1-docker.pkg.dev/telco-churn-vinay-raw/cloud-run-source-deploy/telco-churn-dashboard-service:latest \
+  --region us-east1 \
+  --allow-unauthenticated \
+  --port 8080 \
+  --memory 1Gi \
+  --cpu 1 \
+  --timeout 300 \
+  --set-env-vars DASHBOARD_DATA_SOURCE=bigquery
+```
+
 ---
 
 ## Current End-to-End System
@@ -801,4 +872,20 @@ scored_customers rows: 267
 scored_files rows: 3
 latest generated file: gs://telco-churn-vinay-2026/incoming/synthetic_new_customers_20260512_043838.csv
 scorer idempotency check: 0 rows scored on rerun
+```
+
+Latest live dashboard deployment check:
+
+```text
+dashboard service: telco-churn-dashboard-service
+dashboard revision: telco-churn-dashboard-service-00001-fft
+dashboard URL: https://telco-churn-dashboard-service-aecec5bsxa-ue.a.run.app
+health check: ok
+synthetic_customers rows: 347
+synthetic_customers_model_input rows: 347
+scored_customers rows: 347
+loaded_files rows: 31
+scored_files rows: 11
+invalid model-input service combinations: 0
+null Total Charges in model-input table: 0
 ```
