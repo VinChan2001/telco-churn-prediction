@@ -1,8 +1,22 @@
 # Telco Customer Churn Prediction
 
+[![CI](https://github.com/VinChan2001/telco-churn-prediction/actions/workflows/ci.yml/badge.svg)](https://github.com/VinChan2001/telco-churn-prediction/actions/workflows/ci.yml)
+
 This project builds a production-style customer churn prediction workflow using the IBM/Kaggle Telco Customer Churn dataset.
 
 The goal is not only to train a churn model, but to connect model predictions to business value through threshold tuning, risk segmentation, retention ROI analysis, batch scoring, dashboard outputs, and a cloud-based synthetic ingestion pipeline using Google Cloud.
+
+---
+
+## Live Demo
+
+Public dashboard:
+
+```text
+https://telco-churn-dashboard-service-aecec5bsxa-ue.a.run.app
+```
+
+The dashboard is hosted on Cloud Run and reads the live BigQuery `scored_customers` table. It includes churn-risk summaries, retention targeting views, business impact estimates, model driver rankings, and pipeline freshness checks.
 
 ---
 
@@ -59,6 +73,10 @@ The project currently includes:
 - BigQuery scored customer table
 - Scoring idempotency using a BigQuery `scored_files` metadata table
 - Cloud Run scorer service
+- Cloud Run Streamlit dashboard service
+- Dashboard pipeline freshness indicators
+- Unit tests for generator, BigQuery SQL, and dashboard helper logic
+- GitHub Actions CI for compile and unit test checks
 
 ---
 
@@ -102,6 +120,9 @@ This connects the model output to a business decision: targeting high-risk custo
 
 ```text
 telco-churn-prediction/
+├── .github/
+│   └── workflows/
+│       └── ci.yml
 ├── app/
 │   └── streamlit_app.py
 ├── data/
@@ -134,6 +155,10 @@ telco-churn-prediction/
 │   ├── score_bq_customers.py
 │   ├── refresh_bq_model_input_table.py
 │   └── load_latest_to_bigquery.py
+├── tests/
+│   ├── test_bq_model_input.py
+│   ├── test_dashboard_helpers.py
+│   └── test_synthetic_customer_generator.py
 ├── Makefile
 ├── Dockerfile
 ├── Dockerfile.bq-loader
@@ -144,6 +169,7 @@ telco-churn-prediction/
 ├── cloudbuild-dashboard.yaml
 ├── README.md
 ├── requirements.txt
+├── requirements-dashboard.txt
 └── .gitignore
 ```
 
@@ -841,13 +867,39 @@ Together, these make the project more realistic than a notebook-only churn model
 
 ---
 
+## Validation and CI
+
+Local validation:
+
+```bash
+make test
+```
+
+This runs:
+
+```text
+python -m compileall src app tests
+python -m unittest discover -s tests
+```
+
+GitHub Actions runs the same compile and unit test checks on pushes to `main` and pull requests.
+
+Current focused test coverage includes:
+
+- Synthetic customer feature contract and service constraints
+- BigQuery model-input SQL projection and normalization rules
+- Dashboard formatting, summary, normalization, and pipeline sync helpers
+
+---
+
 ## Next Improvements
 
 Planned next steps:
 
 - Add a separate snake_case analytics view if downstream tools need standard SQL identifiers
-- Add tests for key utility functions
-- Add CI/CD checks for formatting and basic pipeline validation
+- Add a small dashboard screenshot or GIF to the README
+- Add Cloud Monitoring alerts for stale scoring or row-count drift
+- Add a custom domain for the public dashboard if a stable branded URL is needed
 
 ### Latest Validation
 
@@ -878,7 +930,7 @@ Latest live dashboard deployment check:
 
 ```text
 dashboard service: telco-churn-dashboard-service
-dashboard revision: telco-churn-dashboard-service-00001-fft
+dashboard revision: telco-churn-dashboard-service-00002-cv7
 dashboard URL: https://telco-churn-dashboard-service-aecec5bsxa-ue.a.run.app
 health check: ok
 synthetic_customers rows: 347

@@ -14,3 +14,7 @@ pipeline:
 
 dashboard:
 	streamlit run app/streamlit_app.py
+
+test:
+	python -m compileall src app tests
+	python -m unittest discover -s tests
