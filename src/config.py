@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 # Project root directory
@@ -18,7 +19,7 @@ SYNTHETIC_CUSTOMERS_PATH = PROCESSED_DATA_DIR / "synthetic_new_customers.csv"
 MODEL_PATH = PROJECT_ROOT / "models" / "xgb_churn_pipeline.joblib"
 
 # Churn decision threshold
-CHURN_THRESHOLD = 0.30
+CHURN_THRESHOLD = float(os.getenv("CHURN_THRESHOLD", "0.30"))
 
 # Business assumptions
 RETENTION_OFFER_COST = 50

@@ -22,6 +22,7 @@ def score_customers():
             "files_scored": result.files_scored,
             "scored_customers_table": result.scored_customers_table,
             "scored_files_table": result.scored_files_table,
+            "threshold": result.threshold,
         }
     )
 

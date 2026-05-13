@@ -8,6 +8,7 @@ def main() -> None:
     print(f"Files scored: {result.files_scored}")
     print(f"Scored customers table: {result.scored_customers_table}")
     print(f"Scored files table: {result.scored_files_table}")
+    print(f"Threshold: {result.threshold}")
 
 
 if __name__ == "__main__":

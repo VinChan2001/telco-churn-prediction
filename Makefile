@@ -18,3 +18,12 @@ dashboard:
 test:
 	python -m compileall src app tests
 	python -m unittest discover -s tests
+
+vertex-assets:
+	python -m src.upload_vertex_assets
+
+vertex-compile:
+	python -m src.compile_vertex_pipeline
+
+vertex-submit:
+	python -m src.submit_vertex_pipeline

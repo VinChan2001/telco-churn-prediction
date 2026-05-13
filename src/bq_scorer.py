@@ -1,10 +1,13 @@
+import json
+import os
 from dataclasses import dataclass
 from functools import lru_cache
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import joblib
 import pandas as pd
-from google.cloud import bigquery
+from google.cloud import bigquery, storage
 
 from src.bq_model_input import MODEL_INPUT_TABLE_ID, refresh_model_input_table
 from src.config import CHURN_THRESHOLD, MODEL_PATH
@@ -13,6 +16,8 @@ from src.synthetic_customer_generator import FEATURE_COLUMNS
 
 SCORED_CUSTOMERS_TABLE_ID = "telco-churn-vinay-raw.telco_churn.scored_customers"
 SCORED_FILES_TABLE_ID = "telco-churn-vinay-raw.telco_churn.scored_files"
+MODEL_GCS_URI = os.getenv("MODEL_GCS_URI")
+MODEL_METADATA_GCS_URI = os.getenv("MODEL_METADATA_GCS_URI")
 
 METADATA_COLUMNS = ["source_file", "ingested_at", "load_id"]
 SCORING_COLUMNS = [
@@ -30,11 +35,101 @@ class ScoreResult:
     files_scored: int
     scored_customers_table: str
     scored_files_table: str
+    threshold: float
+
+
+_GCS_MODEL_CACHE: dict[str, Any] = {}
+_GCS_METADATA_CACHE: dict[str, Any] = {}
 
 
 @lru_cache(maxsize=1)
-def load_model():
+def _load_local_model():
     return joblib.load(MODEL_PATH)
+
+
+def _parse_gcs_uri(gcs_uri: str) -> tuple[str, str]:
+    if not gcs_uri.startswith("gs://"):
+        raise ValueError(f"Expected a GCS URI, got: {gcs_uri}")
+
+    bucket_name, blob_name = gcs_uri.replace("gs://", "", 1).split("/", 1)
+    return bucket_name, blob_name
+
+
+def _get_gcs_blob(gcs_uri: str) -> storage.Blob:
+    bucket_name, blob_name = _parse_gcs_uri(gcs_uri)
+    client = storage.Client()
+    return client.bucket(bucket_name).blob(blob_name)
+
+
+def _load_gcs_model(model_gcs_uri: str):
+    blob = _get_gcs_blob(model_gcs_uri)
+    blob.reload()
+
+    generation = blob.generation
+    if (
+        _GCS_MODEL_CACHE.get("uri") == model_gcs_uri
+        and _GCS_MODEL_CACHE.get("generation") == generation
+    ):
+        return _GCS_MODEL_CACHE["model"]
+
+    with NamedTemporaryFile(suffix=".joblib", delete=False) as model_file:
+        blob.download_to_filename(model_file.name)
+        model_path = model_file.name
+
+    try:
+        model = joblib.load(model_path)
+    finally:
+        os.unlink(model_path)
+
+    _GCS_MODEL_CACHE.clear()
+    _GCS_MODEL_CACHE.update(
+        {
+            "uri": model_gcs_uri,
+            "generation": generation,
+            "model": model,
+        }
+    )
+    return model
+
+
+def load_model():
+    if MODEL_GCS_URI:
+        return _load_gcs_model(MODEL_GCS_URI)
+
+    return _load_local_model()
+
+
+def load_model_metadata() -> dict[str, Any]:
+    if not MODEL_METADATA_GCS_URI:
+        return {"threshold": CHURN_THRESHOLD}
+
+    blob = _get_gcs_blob(MODEL_METADATA_GCS_URI)
+    blob.reload()
+
+    generation = blob.generation
+    if (
+        _GCS_METADATA_CACHE.get("uri") == MODEL_METADATA_GCS_URI
+        and _GCS_METADATA_CACHE.get("generation") == generation
+    ):
+        return _GCS_METADATA_CACHE["metadata"]
+
+    metadata = json.loads(blob.download_as_text())
+    _GCS_METADATA_CACHE.clear()
+    _GCS_METADATA_CACHE.update(
+        {
+            "uri": MODEL_METADATA_GCS_URI,
+            "generation": generation,
+            "metadata": metadata,
+        }
+    )
+
+    return metadata
+
+
+def load_model_and_threshold():
+    metadata = load_model_metadata()
+    threshold = float(metadata.get("threshold", CHURN_THRESHOLD))
+    return load_model(), threshold
 
 
 def _feature_schema() -> list[bigquery.SchemaField]:
@@ -190,21 +285,23 @@ def score_unscored_customers(
 
     unscored = _query_unscored_rows(client)
     if unscored.empty:
+        threshold = float(load_model_metadata().get("threshold", CHURN_THRESHOLD))
         return ScoreResult(
             rows_scored=0,
             files_scored=0,
             scored_customers_table=SCORED_CUSTOMERS_TABLE_ID,
             scored_files_table=SCORED_FILES_TABLE_ID,
+            threshold=threshold,
         )
 
-    model = load_model()
+    model, threshold = load_model_and_threshold()
     features = unscored[FEATURE_COLUMNS].copy()
     probabilities = model.predict_proba(features)[:, 1]
 
     scored = unscored.copy()
     scored["churn_probability"] = probabilities
     scored["predicted_churn"] = (
-        scored["churn_probability"] >= CHURN_THRESHOLD
+        scored["churn_probability"] >= threshold
     ).astype(int)
     scored["risk_segment"] = scored["churn_probability"].apply(_risk_segment)
     scored["estimated_annual_revenue"] = scored["Monthly Charges"] * 12
@@ -238,4 +335,5 @@ def score_unscored_customers(
         files_scored=len(scored_file_rows),
         scored_customers_table=SCORED_CUSTOMERS_TABLE_ID,
         scored_files_table=SCORED_FILES_TABLE_ID,
+        threshold=threshold,
     )

@@ -77,6 +77,8 @@ The project currently includes:
 - Dashboard pipeline freshness indicators
 - Unit tests for generator, BigQuery SQL, and dashboard helper logic
 - GitHub Actions CI for compile and unit test checks
+- Vertex AI champion/challenger training pipeline
+- GCS-hosted champion model and threshold metadata support for inference
 
 ---
 
@@ -87,30 +89,30 @@ The current selected model is:
 | Item | Value |
 |---|---:|
 | Model | XGBoost |
-| Threshold | 0.30 |
-| ROC AUC | ~0.854 |
-| Churn recall | ~0.77 |
-| Churn precision | ~0.54 |
-| Churn F1-score | ~0.64 |
+| Threshold | 0.22 |
+| ROC AUC | ~0.860 |
+| Churn recall | ~0.853 |
+| Churn precision | ~0.507 |
+| Churn F1-score | ~0.636 |
 
-The threshold was lowered from the default `0.50` to `0.30` because churn prediction is a recall-sensitive business problem. Missing an actual churner may be more expensive than incorrectly flagging a non-churner for a low-cost retention intervention.
+The production threshold is now read from GCS model metadata. The latest Vertex AI champion/challenger run selected `0.22` because churn prediction is a recall-sensitive business problem. Missing an actual churner may be more expensive than incorrectly flagging a non-churner for a low-cost retention intervention.
 
 ---
 
 ## Business Impact Simulation
 
-Using the selected XGBoost model and `0.30` threshold:
+Using the selected XGBoost model and `0.22` threshold:
 
 | Metric | Value |
 |---|---:|
-| Customers flagged for retention | 530 |
-| Actual churners caught | 288 |
-| Estimated annual revenue at risk captured | ~$258K |
+| Customers flagged for retention | 629 |
+| Actual churners caught | 319 |
+| Estimated annual revenue at risk captured | ~$287K |
 | Retention offer cost per customer | $50 |
 | Assumed retention success rate | 25% |
-| Estimated revenue saved | ~$64.6K |
-| Estimated net value | ~$38.1K |
-| Estimated ROI | ~1.44 |
+| Estimated revenue saved | ~$71.8K |
+| Estimated net value | ~$40.4K |
+| Estimated ROI | ~1.28 |
 
 This connects the model output to a business decision: targeting high-risk customers with a retention intervention.
 
@@ -153,8 +155,14 @@ telco-churn-prediction/
 │   ├── cloud_run_bq_loader_app.py
 │   ├── cloud_run_scorer_app.py
 │   ├── score_bq_customers.py
+│   ├── upload_vertex_assets.py
+│   ├── compile_vertex_pipeline.py
+│   ├── submit_vertex_pipeline.py
+│   ├── vertex_champion_pipeline.py
 │   ├── refresh_bq_model_input_table.py
 │   └── load_latest_to_bigquery.py
+├── pipelines/
+│   └── vertex_champion_challenger_pipeline.json
 ├── tests/
 │   ├── test_bq_model_input.py
 │   ├── test_dashboard_helpers.py
@@ -170,6 +178,7 @@ telco-churn-prediction/
 ├── README.md
 ├── requirements.txt
 ├── requirements-dashboard.txt
+├── requirements-vertex.txt
 └── .gitignore
 ```
 
@@ -864,6 +873,100 @@ Streamlit dashboard
 ```
 
 Together, these make the project more realistic than a notebook-only churn model.
+
+---
+
+## Vertex AI Training Pipeline
+
+The project includes a Vertex AI champion/challenger training pipeline for improving the churn model without blindly replacing the production scorer.
+
+Pipeline definition:
+
+```text
+src/vertex_champion_pipeline.py
+```
+
+Compiled pipeline spec:
+
+```text
+pipelines/vertex_champion_challenger_pipeline.json
+```
+
+The pipeline:
+
+- Downloads the original Telco training dataset from GCS
+- Trains a challenger XGBoost pipeline with randomized hyperparameter search
+- Selects a decision threshold using retention net value, recall, and precision constraints
+- Evaluates the current champion model on the same validation split
+- Promotes the challenger only if it beats the champion promotion rules
+- Writes the promoted model and threshold metadata to GCS
+
+Default Vertex/GCS assets:
+
+| Asset | URI |
+|---|---|
+| Training dataset | `gs://telco-churn-vinay-2026/training/Telco_customer_churn.xlsx` |
+| Champion model | `gs://telco-churn-vinay-2026/models/champion/xgb_churn_pipeline.joblib` |
+| Champion metadata | `gs://telco-churn-vinay-2026/models/champion/model_metadata.json` |
+| Candidate models | `gs://telco-churn-vinay-2026/models/candidates/` |
+| Pipeline root | `gs://telco-churn-vinay-2026/vertex/pipeline-root` |
+
+Install Vertex tooling locally:
+
+```bash
+pip install -r requirements-vertex.txt
+```
+
+Upload the current dataset and seed the champion model if it does not already exist:
+
+```bash
+make vertex-assets
+```
+
+To intentionally reset the hosted champion to the local model artifact:
+
+```bash
+python -m src.upload_vertex_assets --overwrite-champion
+```
+
+Compile the Vertex AI pipeline:
+
+```bash
+make vertex-compile
+```
+
+Submit the pipeline:
+
+```bash
+make vertex-submit
+```
+
+The default submit command runs 12 randomized XGBoost trials. To run a larger search:
+
+```bash
+python -m src.submit_vertex_pipeline --n-iter 30
+```
+
+Latest completed run:
+
+| Item | Value |
+|---|---:|
+| Pipeline job | `telco-churn-champion-challenger-20260513183101` |
+| Challenger promoted | `true` |
+| Champion ROC AUC | `0.8536` |
+| Challenger ROC AUC | `0.8596` |
+| Champion net value | `$39.2K` |
+| Challenger net value | `$40.4K` |
+| Promoted threshold | `0.22` |
+
+The deployed Cloud Run scorer can read a GCS-hosted champion model when these environment variables are set:
+
+```text
+MODEL_GCS_URI=gs://telco-churn-vinay-2026/models/champion/xgb_churn_pipeline.joblib
+MODEL_METADATA_GCS_URI=gs://telco-churn-vinay-2026/models/champion/model_metadata.json
+```
+
+When the metadata file changes, the scorer uses the promoted threshold on the next scoring call.
 
 ---
 

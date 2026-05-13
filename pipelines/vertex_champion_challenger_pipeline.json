@@ -1,0 +1,219 @@
+{
+  "components": {
+    "comp-tune-compare-promote-model": {
+      "executorLabel": "exec-tune-compare-promote-model",
+      "inputDefinitions": {
+        "parameters": {
+          "candidate_output_prefix": {
+            "parameterType": "STRING"
+          },
+          "champion_metadata_gcs_uri": {
+            "parameterType": "STRING"
+          },
+          "champion_model_gcs_uri": {
+            "parameterType": "STRING"
+          },
+          "dataset_gcs_uri": {
+            "parameterType": "STRING"
+          },
+          "min_precision": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "min_recall": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "min_roc_auc_delta": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "n_iter": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "promoted_metadata_gcs_uri": {
+            "parameterType": "STRING"
+          },
+          "promoted_model_gcs_uri": {
+            "parameterType": "STRING"
+          },
+          "random_state": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "retention_offer_cost": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "retention_success_rate": {
+            "parameterType": "NUMBER_DOUBLE"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "artifacts": {
+          "metrics": {
+            "artifactType": {
+              "schemaTitle": "system.Metrics",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        }
+      }
+    }
+  },
+  "deploymentSpec": {
+    "executors": {
+      "exec-tune-compare-promote-model": {
+        "container": {
+          "args": [
+            "--executor_input",
+            "{{$}}",
+            "--function_to_execute",
+            "tune_compare_promote_model"
+          ],
+          "command": [
+            "sh",
+            "-c",
+            "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip || python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2' 'numpy==1.26.4' 'scikit-learn==1.5.2' 'xgboost==3.0.4' 'joblib==1.4.2' 'openpyxl' 'google-cloud-storage==3.4.1'  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.1' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\n",
+            "sh",
+            "-ec",
+            "program_path=$(mktemp -d)\n\nprintf \"%s\" \"$0\" > \"$program_path/ephemeral_component.py\"\n_KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         \"$program_path/ephemeral_component.py\"                         \"$@\"\n",
+            "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import *\n\ndef tune_compare_promote_model(\n    dataset_gcs_uri: str,\n    champion_model_gcs_uri: str,\n    champion_metadata_gcs_uri: str,\n    candidate_output_prefix: str,\n    promoted_model_gcs_uri: str,\n    promoted_metadata_gcs_uri: str,\n    n_iter: int,\n    min_recall: float,\n    min_precision: float,\n    min_roc_auc_delta: float,\n    random_state: int,\n    retention_offer_cost: float,\n    retention_success_rate: float,\n    metrics: dsl.Output[dsl.Metrics],\n) -> None:\n    import json\n    import math\n    import tempfile\n    from datetime import datetime, timezone\n    from pathlib import Path\n\n    import joblib\n    import numpy as np\n    import pandas as pd\n    from google.cloud import storage\n    from sklearn.compose import ColumnTransformer\n    from sklearn.metrics import (\n        accuracy_score,\n        f1_score,\n        precision_score,\n        recall_score,\n        roc_auc_score,\n    )\n    from sklearn.model_selection import RandomizedSearchCV, train_test_split\n    from sklearn.pipeline import Pipeline\n    from sklearn.preprocessing import OneHotEncoder, StandardScaler\n    from xgboost import XGBClassifier\n\n    feature_columns = [\n        \"Gender\",\n        \"Senior Citizen\",\n        \"Partner\",\n        \"Dependents\",\n        \"Tenure Months\",\n        \"Phone Service\",\n        \"Multiple Lines\",\n        \"Internet Service\",\n        \"Online Security\",\n        \"Online Backup\",\n        \"Device Protection\",\n        \"Tech Support\",\n        \"Streaming TV\",\n        \"Streaming Movies\",\n        \"Contract\",\n        \"Paperless Billing\",\n        \"Payment Method\",\n        \"Monthly Charges\",\n        \"Total Charges\",\n    ]\n    columns_to_drop = [\n        \"CustomerID\",\n        \"Count\",\n        \"Country\",\n        \"State\",\n        \"City\",\n        \"Zip Code\",\n        \"Lat Long\",\n        \"Latitude\",\n        \"Longitude\",\n        \"Churn Label\",\n        \"Churn Value\",\n        \"Churn Score\",\n        \"CLTV\",\n        \"Churn Reason\",\n    ]\n\n    def parse_gcs_uri(gcs_uri: str) -> tuple[str, str]:\n        if not gcs_uri.startswith(\"gs://\"):\n            raise ValueError(f\"Expected GCS URI, got: {gcs_uri}\")\n        bucket_name, blob_name = gcs_uri.replace(\"gs://\", \"\", 1).split(\"/\", 1)\n        return bucket_name, blob_name\n\n    def to_builtin(value):\n        if isinstance(value, dict):\n            return {key: to_builtin(item) for key, item in value.items()}\n        if isinstance(value, list):\n            return [to_builtin(item) for item in value]\n        if hasattr(value, \"item\"):\n            return value.item()\n        return value\n\n    def download_gcs_file(gcs_uri: str, suffix: str = \"\") -> Path:\n        bucket_name, blob_name = parse_gcs_uri(gcs_uri)\n        storage_client = storage.Client()\n        blob = storage_client.bucket(bucket_name).blob(blob_name)\n        target = Path(tempfile.NamedTemporaryFile(suffix=suffix, delete=False).name)\n        blob.download_to_filename(target)\n        return target\n\n    def upload_file(source_path: Path, target_gcs_uri: str) -> None:\n        bucket_name, blob_name = parse_gcs_uri(target_gcs_uri)\n        storage_client = storage.Client()\n        blob = storage_client.bucket(bucket_name).blob(blob_name)\n        blob.upload_from_filename(source_path)\n\n    def upload_json(payload: dict, target_gcs_uri: str) -> None:\n        bucket_name, blob_name = parse_gcs_uri(target_gcs_uri)\n        storage_client = storage.Client()\n        blob = storage_client.bucket(bucket_name).blob(blob_name)\n        blob.upload_from_string(\n            json.dumps(payload, indent=2, sort_keys=True),\n            content_type=\"application/json\",\n        )\n\n    def build_pipeline(params: dict | None = None) -> Pipeline:\n        params = params or {}\n        categorical_features = X_train.select_dtypes(\n            include=[\"object\"]\n        ).columns.tolist()\n        numeric_features = X_train.select_dtypes(\n            exclude=[\"object\"]\n        ).columns.tolist()\n\n        preprocessor = ColumnTransformer(\n            transformers=[\n                (\n                    \"num\",\n                    Pipeline(steps=[(\"scaler\", StandardScaler())]),\n                    numeric_features,\n                ),\n                (\n                    \"cat\",\n                    Pipeline(\n                        steps=[\n                            (\"onehot\", OneHotEncoder(handle_unknown=\"ignore\")),\n                        ]\n                    ),\n                    categorical_features,\n                ),\n            ]\n        )\n        classifier = XGBClassifier(\n            objective=\"binary:logistic\",\n            eval_metric=\"logloss\",\n            random_state=random_state,\n            n_jobs=1,\n            **params,\n        )\n\n        return Pipeline(\n            steps=[\n                (\"preprocessor\", preprocessor),\n                (\"classifier\", classifier),\n            ]\n        )\n\n    def evaluate_thresholds(model, threshold_grid: list[float]) -> dict:\n        probabilities = model.predict_proba(X_test)[:, 1]\n        roc_auc = roc_auc_score(y_test, probabilities)\n        rows = []\n\n        for threshold in threshold_grid:\n            predictions = (probabilities >= threshold).astype(int)\n            flagged = predictions == 1\n            true_churn_captured = (predictions == 1) & (y_test.to_numpy() == 1)\n            captured_revenue = (\n                X_test.loc[true_churn_captured, \"Monthly Charges\"].sum() * 12\n            )\n            campaign_cost = flagged.sum() * retention_offer_cost\n            estimated_revenue_saved = captured_revenue * retention_success_rate\n            net_value = estimated_revenue_saved - campaign_cost\n\n            rows.append(\n                {\n                    \"threshold\": threshold,\n                    \"roc_auc\": roc_auc,\n                    \"accuracy\": accuracy_score(y_test, predictions),\n                    \"precision\": precision_score(\n                        y_test,\n                        predictions,\n                        zero_division=0,\n                    ),\n                    \"recall\": recall_score(y_test, predictions, zero_division=0),\n                    \"f1\": f1_score(y_test, predictions, zero_division=0),\n                    \"flagged_customers\": int(flagged.sum()),\n                    \"captured_revenue\": float(captured_revenue),\n                    \"estimated_revenue_saved\": float(estimated_revenue_saved),\n                    \"campaign_cost\": float(campaign_cost),\n                    \"net_value\": float(net_value),\n                }\n            )\n\n        valid_rows = [\n            row for row in rows\n            if row[\"recall\"] >= min_recall and row[\"precision\"] >= min_precision\n        ]\n        if not valid_rows:\n            valid_rows = rows\n\n        return max(\n            valid_rows,\n            key=lambda row: (\n                row[\"net_value\"],\n                row[\"recall\"],\n                row[\"precision\"],\n                row[\"roc_auc\"],\n            ),\n        )\n\n    print(\"Downloading training dataset...\", flush=True)\n    dataset_path = download_gcs_file(dataset_gcs_uri, suffix=\".xlsx\")\n    dataset = pd.read_excel(dataset_path)\n    dataset[\"Total Charges\"] = pd.to_numeric(\n        dataset[\"Total Charges\"],\n        errors=\"coerce\",\n    )\n\n    X = dataset.drop(columns=columns_to_drop, errors=\"ignore\")\n    X = X[feature_columns]\n    y = dataset[\"Churn Value\"]\n\n    print(\"Creating train/test split...\", flush=True)\n    X_train, X_test, y_train, y_test = train_test_split(\n        X,\n        y,\n        test_size=0.2,\n        random_state=random_state,\n        stratify=y,\n    )\n\n    baseline_pipeline = build_pipeline()\n    param_distributions = {\n        \"classifier__n_estimators\": [150, 250, 350, 500],\n        \"classifier__learning_rate\": [0.01, 0.03, 0.05, 0.08, 0.10],\n        \"classifier__max_depth\": [2, 3, 4, 5],\n        \"classifier__min_child_weight\": [1, 3, 5, 8],\n        \"classifier__subsample\": [0.70, 0.80, 0.90, 1.00],\n        \"classifier__colsample_bytree\": [0.70, 0.80, 0.90, 1.00],\n        \"classifier__reg_alpha\": [0.0, 0.01, 0.1, 0.5],\n        \"classifier__reg_lambda\": [0.5, 1.0, 2.0, 5.0],\n    }\n    print(f\"Running randomized search with {n_iter} trials...\", flush=True)\n    search = RandomizedSearchCV(\n        estimator=baseline_pipeline,\n        param_distributions=param_distributions,\n        n_iter=n_iter,\n        scoring=\"roc_auc\",\n        cv=3,\n        random_state=random_state,\n        n_jobs=1,\n        verbose=2,\n    )\n    search.fit(X_train, y_train)\n    candidate_model = search.best_estimator_\n\n    print(\"Evaluating challenger model...\", flush=True)\n    threshold_grid = [round(value, 2) for value in np.arange(0.10, 0.71, 0.02)]\n    candidate_metrics = evaluate_thresholds(candidate_model, threshold_grid)\n\n    champion_exists = True\n    champion_metrics = None\n    try:\n        print(\"Evaluating champion model...\", flush=True)\n        champion_path = download_gcs_file(champion_model_gcs_uri, suffix=\".joblib\")\n        champion_model = joblib.load(champion_path)\n        champion_metrics = evaluate_thresholds(champion_model, threshold_grid)\n    except Exception as exc:\n        print(f\"Champion model unavailable or unevaluable: {exc}\", flush=True)\n        champion_exists = False\n\n    candidate_model_uri = f\"{candidate_output_prefix}/xgb_churn_pipeline.joblib\"\n    candidate_metadata_uri = f\"{candidate_output_prefix}/model_metadata.json\"\n    candidate_model_path = Path(\n        tempfile.NamedTemporaryFile(suffix=\".joblib\", delete=False).name\n    )\n    joblib.dump(candidate_model, candidate_model_path)\n    upload_file(candidate_model_path, candidate_model_uri)\n\n    if champion_exists:\n        promote = (\n            candidate_metrics[\"roc_auc\"]\n            >= champion_metrics[\"roc_auc\"] + min_roc_auc_delta\n            and candidate_metrics[\"recall\"] >= min_recall\n            and candidate_metrics[\"precision\"] >= min_precision\n            and candidate_metrics[\"net_value\"] > champion_metrics[\"net_value\"]\n        )\n    else:\n        promote = True\n\n    metadata = to_builtin({\n        \"model_type\": \"xgboost_sklearn_pipeline\",\n        \"created_at\": datetime.now(timezone.utc).isoformat(),\n        \"dataset_gcs_uri\": dataset_gcs_uri,\n        \"feature_columns\": feature_columns,\n        \"threshold\": candidate_metrics[\"threshold\"],\n        \"best_params\": search.best_params_,\n        \"candidate_metrics\": candidate_metrics,\n        \"champion_metrics\": champion_metrics,\n        \"promotion_rules\": {\n            \"min_recall\": min_recall,\n            \"min_precision\": min_precision,\n            \"min_roc_auc_delta\": min_roc_auc_delta,\n            \"requires_net_value_improvement\": True,\n        },\n        \"promoted\": bool(promote),\n        \"candidate_model_gcs_uri\": candidate_model_uri,\n    })\n    upload_json(metadata, candidate_metadata_uri)\n\n    if promote:\n        print(\"Promoting challenger to champion.\", flush=True)\n        upload_file(candidate_model_path, promoted_model_gcs_uri)\n        upload_json(metadata, promoted_metadata_gcs_uri)\n    else:\n        print(\"Keeping existing champion model.\", flush=True)\n\n    metrics.log_metric(\"candidate_roc_auc\", float(candidate_metrics[\"roc_auc\"]))\n    metrics.log_metric(\"candidate_precision\", float(candidate_metrics[\"precision\"]))\n    metrics.log_metric(\"candidate_recall\", float(candidate_metrics[\"recall\"]))\n    metrics.log_metric(\"candidate_f1\", float(candidate_metrics[\"f1\"]))\n    metrics.log_metric(\"candidate_net_value\", float(candidate_metrics[\"net_value\"]))\n    metrics.log_metric(\"candidate_threshold\", float(candidate_metrics[\"threshold\"]))\n    metrics.log_metric(\"promoted\", int(promote))\n\n    if champion_metrics:\n        metrics.log_metric(\"champion_roc_auc\", float(champion_metrics[\"roc_auc\"]))\n        metrics.log_metric(\n            \"champion_precision\",\n            float(champion_metrics[\"precision\"]),\n        )\n        metrics.log_metric(\"champion_recall\", float(champion_metrics[\"recall\"]))\n        metrics.log_metric(\"champion_f1\", float(champion_metrics[\"f1\"]))\n        metrics.log_metric(\n            \"champion_net_value\",\n            float(champion_metrics[\"net_value\"]),\n        )\n\n    # KFP metrics require finite floats.\n    for key, value in candidate_metrics.items():\n        if isinstance(value, float) and not math.isfinite(value):\n            raise ValueError(f\"Non-finite candidate metric {key}: {value}\")\n\n"
+          ],
+          "image": "python:3.11-slim"
+        }
+      }
+    }
+  },
+  "pipelineInfo": {
+    "description": "Tune an XGBoost churn model and promote it only if it beats the champion.",
+    "name": "telco-churn-champion-challenger"
+  },
+  "root": {
+    "dag": {
+      "tasks": {
+        "tune-compare-promote-model": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-tune-compare-promote-model"
+          },
+          "inputs": {
+            "parameters": {
+              "candidate_output_prefix": {
+                "componentInputParameter": "candidate_output_prefix"
+              },
+              "champion_metadata_gcs_uri": {
+                "componentInputParameter": "champion_metadata_gcs_uri"
+              },
+              "champion_model_gcs_uri": {
+                "componentInputParameter": "champion_model_gcs_uri"
+              },
+              "dataset_gcs_uri": {
+                "componentInputParameter": "dataset_gcs_uri"
+              },
+              "min_precision": {
+                "componentInputParameter": "min_precision"
+              },
+              "min_recall": {
+                "componentInputParameter": "min_recall"
+              },
+              "min_roc_auc_delta": {
+                "componentInputParameter": "min_roc_auc_delta"
+              },
+              "n_iter": {
+                "componentInputParameter": "n_iter"
+              },
+              "promoted_metadata_gcs_uri": {
+                "componentInputParameter": "promoted_metadata_gcs_uri"
+              },
+              "promoted_model_gcs_uri": {
+                "componentInputParameter": "promoted_model_gcs_uri"
+              },
+              "random_state": {
+                "componentInputParameter": "random_state"
+              },
+              "retention_offer_cost": {
+                "componentInputParameter": "retention_offer_cost"
+              },
+              "retention_success_rate": {
+                "componentInputParameter": "retention_success_rate"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "tune-compare-promote-model"
+          }
+        }
+      }
+    },
+    "inputDefinitions": {
+      "parameters": {
+        "candidate_output_prefix": {
+          "defaultValue": "gs://telco-churn-vinay-2026/models/candidates/manual-run",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "champion_metadata_gcs_uri": {
+          "defaultValue": "gs://telco-churn-vinay-2026/models/champion/model_metadata.json",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "champion_model_gcs_uri": {
+          "defaultValue": "gs://telco-churn-vinay-2026/models/champion/xgb_churn_pipeline.joblib",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "dataset_gcs_uri": {
+          "defaultValue": "gs://telco-churn-vinay-2026/training/Telco_customer_churn.xlsx",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "min_precision": {
+          "defaultValue": 0.5,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "min_recall": {
+          "defaultValue": 0.75,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "min_roc_auc_delta": {
+          "defaultValue": 0.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "n_iter": {
+          "defaultValue": 12.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "promoted_metadata_gcs_uri": {
+          "defaultValue": "gs://telco-churn-vinay-2026/models/champion/model_metadata.json",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "promoted_model_gcs_uri": {
+          "defaultValue": "gs://telco-churn-vinay-2026/models/champion/xgb_churn_pipeline.joblib",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "random_state": {
+          "defaultValue": 42.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "retention_offer_cost": {
+          "defaultValue": 50.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "retention_success_rate": {
+          "defaultValue": 0.25,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        }
+      }
+    }
+  },
+  "schemaVersion": "2.1.0",
+  "sdkVersion": "kfp-2.16.1"
+}
