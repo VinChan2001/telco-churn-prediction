@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements-training-trigger.txt .
+
+RUN pip install --no-cache-dir -r requirements-training-trigger.txt
+
+COPY . .
+
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "src.cloud_run_training_trigger_app:app"]

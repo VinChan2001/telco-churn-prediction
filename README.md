@@ -78,6 +78,7 @@ The project currently includes:
 - Unit tests for generator, BigQuery SQL, and dashboard helper logic
 - GitHub Actions CI for compile and unit test checks
 - Vertex AI champion/challenger training pipeline
+- Cloud Run training-data trigger for labeled retraining events
 - GCS-hosted champion model and threshold metadata support for inference
 
 ---
@@ -154,7 +155,9 @@ telco-churn-prediction/
 │   ├── bq_scorer.py
 │   ├── cloud_run_bq_loader_app.py
 │   ├── cloud_run_scorer_app.py
+│   ├── cloud_run_training_trigger_app.py
 │   ├── score_bq_customers.py
+│   ├── training_trigger.py
 │   ├── upload_vertex_assets.py
 │   ├── compile_vertex_pipeline.py
 │   ├── submit_vertex_pipeline.py
@@ -166,18 +169,22 @@ telco-churn-prediction/
 ├── tests/
 │   ├── test_bq_model_input.py
 │   ├── test_dashboard_helpers.py
-│   └── test_synthetic_customer_generator.py
+│   ├── test_synthetic_customer_generator.py
+│   └── test_training_trigger.py
 ├── Makefile
 ├── Dockerfile
 ├── Dockerfile.bq-loader
 ├── Dockerfile.scorer
 ├── Dockerfile.dashboard
+├── Dockerfile.training-trigger
 ├── cloudbuild-bq-loader.yaml
 ├── cloudbuild-scorer.yaml
 ├── cloudbuild-dashboard.yaml
+├── cloudbuild-training-trigger.yaml
 ├── README.md
 ├── requirements.txt
 ├── requirements-dashboard.txt
+├── requirements-training-trigger.txt
 ├── requirements-vertex.txt
 └── .gitignore
 ```
@@ -276,18 +283,22 @@ Writes scored customers and scored file metadata to BigQuery
 | GCP Project | `telco-churn-vinay-raw` |
 | GCS Bucket | `telco-churn-vinay-2026` |
 | GCS Landing Folder | `incoming/` |
+| GCS Labeled Training Folder | `training/incoming/` |
 | Cloud Run Service 1 | `telco-faker-service` |
 | Cloud Run Service 2 | `telco-bq-loader-service` |
 | Cloud Run Service 3 | `telco-bq-scorer-service` |
 | Cloud Run Service 4 | `telco-churn-dashboard-service` |
+| Cloud Run Service 5 | `telco-training-trigger-service` |
 | Cloud Scheduler Job | `telco-faker-every-6-hours` |
 | Eventarc Trigger | `telco-gcs-to-bq-loader` |
+| Eventarc Training Trigger | `telco-training-data-to-vertex` |
 | BigQuery Dataset | `telco_churn` |
 | BigQuery Main Table | `synthetic_customers` |
 | BigQuery Model Input Table | `synthetic_customers_model_input` |
 | BigQuery Scored Table | `scored_customers` |
 | BigQuery Loaded Metadata Table | `loaded_files` |
 | BigQuery Scored Metadata Table | `scored_files` |
+| BigQuery Training Metadata Table | `training_pipeline_runs` |
 
 ---
 
@@ -806,6 +817,22 @@ gcloud run deploy telco-bq-scorer-service \
   --allow-unauthenticated
 ```
 
+Build training trigger image:
+
+```bash
+gcloud builds submit --config cloudbuild-training-trigger.yaml .
+```
+
+Deploy training trigger service:
+
+```bash
+gcloud run deploy telco-training-trigger-service \
+  --image us-east1-docker.pkg.dev/telco-churn-vinay-raw/cloud-run-source-deploy/telco-training-trigger-service:latest \
+  --region us-east1 \
+  --allow-unauthenticated \
+  --set-env-vars TRAINING_DATA_PREFIX=training/incoming/,MIN_TRAINING_ROWS=100,VERTEX_N_ITER=12
+```
+
 Build dashboard image:
 
 ```bash
@@ -970,6 +997,81 @@ When the metadata file changes, the scorer uses the promoted threshold on the ne
 
 ---
 
+## Training Data Retraining Trigger
+
+The project also includes a Cloud Run trigger service for labeled training-data uploads. This is intentionally separate from the synthetic customer ingestion flow because new inference rows do not contain true churn labels.
+
+Service:
+
+```text
+telco-training-trigger-service
+```
+
+Main app file:
+
+```text
+src/cloud_run_training_trigger_app.py
+```
+
+Core trigger logic:
+
+```text
+src/training_trigger.py
+```
+
+The trigger watches for new files in:
+
+```text
+gs://telco-churn-vinay-2026/training/incoming/
+```
+
+Accepted file formats:
+
+```text
+.csv
+.xlsx
+```
+
+Required training contract:
+
+- All model feature columns
+- `Churn Value`
+- At least 100 rows by default
+- `Churn Value` must contain 0/1 labels
+
+When a valid labeled training file arrives, the service:
+
+- Creates or reuses the BigQuery metadata table `telco-churn-vinay-raw.telco_churn.training_pipeline_runs`
+- Skips duplicate GCS file generations that were already submitted
+- Validates the uploaded training file
+- Submits the Vertex AI champion/challenger pipeline with the new file as `dataset_gcs_uri`
+- Records the submitted Vertex pipeline job and candidate model prefix
+
+The BigQuery loader ignores objects under `training/`, so a training CSV cannot be accidentally loaded as synthetic inference data.
+
+Build and deploy:
+
+```bash
+make training-trigger-build
+make training-trigger-deploy
+```
+
+Create the Eventarc trigger:
+
+```bash
+gcloud eventarc triggers create telco-training-data-to-vertex \
+  --location us-east1 \
+  --destination-run-service telco-training-trigger-service \
+  --destination-run-region us-east1 \
+  --event-filters type=google.cloud.storage.object.v1.finalized \
+  --event-filters bucket=telco-churn-vinay-2026 \
+  --service-account 516325234883-compute@developer.gserviceaccount.com
+```
+
+Because Eventarc filters at bucket level here, the service itself enforces the `training/incoming/` prefix before submitting any pipeline.
+
+---
+
 ## Validation and CI
 
 Local validation:
@@ -992,6 +1094,7 @@ Current focused test coverage includes:
 - Synthetic customer feature contract and service constraints
 - BigQuery model-input SQL projection and normalization rules
 - Dashboard formatting, summary, normalization, and pipeline sync helpers
+- Training-data trigger validation and prefix/file-type filtering
 
 ---
 
@@ -1028,6 +1131,8 @@ scored_files rows: 3
 latest generated file: gs://telco-churn-vinay-2026/incoming/synthetic_new_customers_20260512_043838.csv
 scorer idempotency check: 0 rows scored on rerun
 ```
+
+The latest training-trigger smoke test uploaded an intentionally invalid CSV to `training/incoming/` and confirmed that Eventarc reached `telco-training-trigger-service`, the file was rejected before Vertex submission, and the BigQuery loader did not load it as inference data.
 
 Latest live dashboard deployment check:
 

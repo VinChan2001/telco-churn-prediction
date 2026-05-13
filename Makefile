@@ -27,3 +27,14 @@ vertex-compile:
 
 vertex-submit:
 	python -m src.submit_vertex_pipeline
+
+training-trigger-build:
+	gcloud builds submit --config cloudbuild-training-trigger.yaml
+
+training-trigger-deploy:
+	gcloud run deploy telco-training-trigger-service \
+		--image us-east1-docker.pkg.dev/telco-churn-vinay-raw/cloud-run-source-deploy/telco-training-trigger-service:latest \
+		--region us-east1 \
+		--platform managed \
+		--allow-unauthenticated \
+		--set-env-vars TRAINING_DATA_PREFIX=training/incoming/,MIN_TRAINING_ROWS=100,VERTEX_N_ITER=12

@@ -36,6 +36,15 @@ def load_gcs_event_to_bigquery():
             }
         ), 400
 
+    if file_name.startswith("training/"):
+        return jsonify(
+            {
+                "status": "skipped",
+                "message": "Training files are handled by the Vertex retraining trigger",
+                "file_name": file_name,
+            }
+        )
+
     if not file_name.endswith(".csv"):
         return jsonify(
             {
