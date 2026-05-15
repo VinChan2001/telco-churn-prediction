@@ -5,10 +5,13 @@ import pandas as pd
 from app.streamlit_app import (
     dashboard_summary,
     format_currency,
+    format_decimal,
     format_int,
     format_percent,
     format_timestamp,
+    model_ops_summary,
     normalize_scored_customers,
+    parse_gcs_uri,
     pipeline_is_in_sync,
 )
 
@@ -18,10 +21,17 @@ class DashboardHelpersTest(unittest.TestCase):
         self.assertEqual(format_int(1200), "1,200")
         self.assertEqual(format_currency(12345.67), "$12,346")
         self.assertEqual(format_percent(0.1234), "12.3%")
+        self.assertEqual(format_decimal(0.225, 2), "0.23")
         self.assertEqual(
             format_timestamp("2026-05-13T18:01:09Z"),
             "2026-05-13 18:01 UTC",
         )
+
+    def test_parse_gcs_uri(self):
+        bucket_name, blob_name = parse_gcs_uri("gs://bucket/path/to/file.json")
+
+        self.assertEqual(bucket_name, "bucket")
+        self.assertEqual(blob_name, "path/to/file.json")
 
     def test_normalize_scored_customers_adds_missing_fields(self):
         customers = pd.DataFrame(
@@ -90,6 +100,32 @@ class DashboardHelpersTest(unittest.TestCase):
 
         freshness["scored_rows"] = 9
         self.assertFalse(pipeline_is_in_sync(freshness))
+
+    def test_model_ops_summary_uses_metadata_and_training_runs(self):
+        metadata = {
+            "threshold": 0.22,
+            "promoted": True,
+            "created_at": "2026-05-13T22:34:02Z",
+            "candidate_metrics": {
+                "roc_auc": 0.8596,
+                "recall": 0.8529,
+                "precision": 0.5071,
+                "net_value": 40358.6,
+            },
+        }
+        training_runs = pd.DataFrame(
+            [
+                {"status": "submitted", "created_at": "2026-05-14T01:00:00Z"},
+                {"status": "rejected", "created_at": "2026-05-14T02:00:00Z"},
+            ]
+        )
+
+        summary = model_ops_summary(metadata, training_runs)
+
+        self.assertEqual(summary["threshold"], 0.22)
+        self.assertEqual(summary["submitted_training_runs"], 1)
+        self.assertEqual(summary["rejected_training_runs"], 1)
+        self.assertEqual(summary["training_events"], 2)
 
 
 if __name__ == "__main__":

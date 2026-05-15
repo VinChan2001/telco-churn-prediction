@@ -16,7 +16,7 @@ Public dashboard:
 https://telco-churn-dashboard-service-aecec5bsxa-ue.a.run.app
 ```
 
-The dashboard is hosted on Cloud Run and reads the live BigQuery `scored_customers` table. It includes churn-risk summaries, retention targeting views, business impact estimates, model driver rankings, and pipeline freshness checks.
+The dashboard is hosted on Cloud Run and reads the live BigQuery `scored_customers` table. It includes churn-risk summaries, retention targeting views, business impact estimates, model driver rankings, pipeline freshness checks, and model-ops monitoring.
 
 ---
 
@@ -75,6 +75,7 @@ The project currently includes:
 - Cloud Run scorer service
 - Cloud Run Streamlit dashboard service
 - Dashboard pipeline freshness indicators
+- Dashboard model-ops tab for champion metadata and retraining runs
 - Unit tests for generator, BigQuery SQL, and dashboard helper logic
 - GitHub Actions CI for compile and unit test checks
 - Vertex AI champion/challenger training pipeline
@@ -224,6 +225,15 @@ By default, the dashboard reads from BigQuery:
 ```text
 telco-churn-vinay-raw.telco_churn.scored_customers
 ```
+
+The dashboard also reads:
+
+```text
+gs://telco-churn-vinay-2026/models/champion/model_metadata.json
+telco-churn-vinay-raw.telco_churn.training_pipeline_runs
+```
+
+The `Model Ops` tab shows the promoted champion threshold and metrics, champion artifact metadata, selected hyperparameters, and recent labeled-training trigger activity.
 
 If BigQuery access fails, it falls back to local processed outputs such as:
 
@@ -1138,14 +1148,16 @@ Latest live dashboard deployment check:
 
 ```text
 dashboard service: telco-churn-dashboard-service
-dashboard revision: telco-churn-dashboard-service-00002-cv7
+dashboard revision: telco-churn-dashboard-service-00003-2v4
 dashboard URL: https://telco-churn-dashboard-service-aecec5bsxa-ue.a.run.app
 health check: ok
-synthetic_customers rows: 347
-synthetic_customers_model_input rows: 347
-scored_customers rows: 347
-loaded_files rows: 31
-scored_files rows: 11
+model ops tab: champion metadata and training trigger runs
+synthetic_customers rows: 437
+synthetic_customers_model_input rows: 437
+scored_customers rows: 437
+loaded_files rows: 40
+scored_files rows: 19
+training_pipeline_runs rows: 2
 invalid model-input service combinations: 0
 null Total Charges in model-input table: 0
 ```

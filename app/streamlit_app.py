@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Any
 
@@ -11,6 +12,11 @@ RAW_CUSTOMERS_TABLE = "telco-churn-vinay-raw.telco_churn.synthetic_customers"
 MODEL_INPUT_TABLE = "telco-churn-vinay-raw.telco_churn.synthetic_customers_model_input"
 LOADED_FILES_TABLE = "telco-churn-vinay-raw.telco_churn.loaded_files"
 SCORED_FILES_TABLE = "telco-churn-vinay-raw.telco_churn.scored_files"
+TRAINING_RUNS_TABLE = "telco-churn-vinay-raw.telco_churn.training_pipeline_runs"
+MODEL_METADATA_GCS_URI = os.getenv(
+    "MODEL_METADATA_GCS_URI",
+    "gs://telco-churn-vinay-2026/models/champion/model_metadata.json",
+)
 HISTORICAL_SOURCE_FILE = "__historical_pre_source_file__"
 
 LOCAL_SCORED_CUSTOMERS_PATH = "data/processed/scored_churn_customers.csv"
@@ -42,6 +48,12 @@ def format_percent(value: Any) -> str:
     return f"{float(value) * 100:.1f}%"
 
 
+def format_decimal(value: Any, places: int = 3) -> str:
+    if value is None or pd.isna(value):
+        return "Not available"
+    return f"{float(value):.{places}f}"
+
+
 def format_timestamp(value: Any) -> str:
     if value is None or pd.isna(value):
         return "Not available"
@@ -51,6 +63,14 @@ def format_timestamp(value: Any) -> str:
         return "Not available"
 
     return timestamp.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def parse_gcs_uri(gcs_uri: str) -> tuple[str, str]:
+    if not gcs_uri.startswith("gs://"):
+        raise ValueError(f"Expected a GCS URI, got: {gcs_uri}")
+
+    bucket_name, blob_name = gcs_uri.replace("gs://", "", 1).split("/", 1)
+    return bucket_name, blob_name
 
 
 def risk_segment_from_probability(probability: float) -> str:
@@ -239,6 +259,79 @@ def load_pipeline_freshness(
         return {}, str(exc)
 
 
+def load_champion_metadata(
+    metadata_gcs_uri: str = MODEL_METADATA_GCS_URI,
+) -> tuple[dict[str, Any], str | None]:
+    try:
+        from google.cloud import storage
+
+        bucket_name, blob_name = parse_gcs_uri(metadata_gcs_uri)
+        client = storage.Client()
+        metadata_text = client.bucket(bucket_name).blob(blob_name).download_as_text()
+        return json.loads(metadata_text), None
+    except Exception as exc:
+        return {}, str(exc)
+
+
+def load_training_runs(
+    data_source: str | None = None,
+    limit: int = 10,
+) -> tuple[pd.DataFrame, str | None]:
+    data_source = (data_source or os.getenv("DASHBOARD_DATA_SOURCE", "bigquery")).lower()
+    if data_source == "local":
+        return pd.DataFrame(), "Training runs are unavailable in local CSV mode."
+
+    query = f"""
+    SELECT
+      run_id,
+      file_uri,
+      file_generation,
+      status,
+      message,
+      row_count,
+      pipeline_job_name,
+      candidate_output_prefix,
+      created_at
+    FROM `{TRAINING_RUNS_TABLE}`
+    ORDER BY created_at DESC
+    LIMIT {int(limit)}
+    """
+
+    try:
+        return query_bigquery_dataframe(query), None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
+def model_ops_summary(
+    champion_metadata: dict[str, Any],
+    training_runs: pd.DataFrame,
+) -> dict[str, Any]:
+    candidate_metrics = champion_metadata.get("candidate_metrics") or {}
+    submitted_runs = 0
+    rejected_runs = 0
+    latest_training_event = None
+
+    if not training_runs.empty:
+        submitted_runs = int((training_runs["status"] == "submitted").sum())
+        rejected_runs = int((training_runs["status"] == "rejected").sum())
+        latest_training_event = training_runs["created_at"].max()
+
+    return {
+        "threshold": champion_metadata.get("threshold"),
+        "promoted": champion_metadata.get("promoted"),
+        "created_at": champion_metadata.get("created_at"),
+        "roc_auc": candidate_metrics.get("roc_auc"),
+        "recall": candidate_metrics.get("recall"),
+        "precision": candidate_metrics.get("precision"),
+        "net_value": candidate_metrics.get("net_value"),
+        "training_events": len(training_runs),
+        "submitted_training_runs": submitted_runs,
+        "rejected_training_runs": rejected_runs,
+        "latest_training_event": latest_training_event,
+    }
+
+
 @st.cache_data(ttl=300)
 def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str, str | None]:
     scored_customers, source_name, source_error = load_scored_customers()
@@ -259,6 +352,13 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str, str | No
 @st.cache_data(ttl=300)
 def cached_pipeline_freshness() -> tuple[dict[str, Any], str | None]:
     return load_pipeline_freshness()
+
+
+@st.cache_data(ttl=300)
+def cached_model_ops() -> tuple[dict[str, Any], str | None, pd.DataFrame, str | None]:
+    champion_metadata, metadata_error = load_champion_metadata()
+    training_runs, training_runs_error = load_training_runs()
+    return champion_metadata, metadata_error, training_runs, training_runs_error
 
 
 def create_risk_summary(scored_customers: pd.DataFrame) -> pd.DataFrame:
@@ -547,6 +647,103 @@ def render_pipeline(freshness: dict[str, Any], freshness_error: str | None) -> N
     st.dataframe(latest, use_container_width=True, hide_index=True)
 
 
+def render_model_ops(
+    champion_metadata: dict[str, Any],
+    metadata_error: str | None,
+    training_runs: pd.DataFrame,
+    training_runs_error: str | None,
+) -> None:
+    if metadata_error:
+        st.warning(f"Champion metadata unavailable: {metadata_error}")
+
+    if training_runs_error:
+        st.warning(f"Training run history unavailable: {training_runs_error}")
+
+    summary = model_ops_summary(champion_metadata, training_runs)
+
+    st.subheader("Champion Model")
+    champion_row = st.columns(5)
+    champion_row[0].metric("Threshold", format_decimal(summary["threshold"], 2))
+    champion_row[1].metric("ROC AUC", format_decimal(summary["roc_auc"]))
+    champion_row[2].metric("Recall", format_percent(summary["recall"]))
+    champion_row[3].metric("Precision", format_percent(summary["precision"]))
+    champion_row[4].metric("Net Value", format_currency(summary["net_value"]))
+
+    metadata_row = st.columns(3)
+    metadata_row[0].metric("Promoted", str(summary["promoted"]))
+    metadata_row[1].metric(
+        "Feature Count",
+        format_int(len(champion_metadata.get("feature_columns") or [])),
+    )
+    metadata_row[2].metric("Created", format_timestamp(summary["created_at"]))
+
+    model_assets = pd.DataFrame(
+        [
+            {
+                "asset": "Model type",
+                "value": champion_metadata.get("model_type", "Not available"),
+            },
+            {
+                "asset": "Training dataset",
+                "value": champion_metadata.get("dataset_gcs_uri", "Not available"),
+            },
+            {
+                "asset": "Candidate model",
+                "value": champion_metadata.get(
+                    "candidate_model_gcs_uri",
+                    "Not available",
+                ),
+            },
+        ]
+    )
+    st.dataframe(model_assets, use_container_width=True, hide_index=True)
+
+    best_params = champion_metadata.get("best_params") or {}
+    if best_params:
+        st.subheader("Promoted Hyperparameters")
+        best_params_table = pd.DataFrame(
+            [{"parameter": key, "value": value} for key, value in best_params.items()]
+        )
+        st.dataframe(best_params_table, use_container_width=True, hide_index=True)
+
+    st.subheader("Labeled Training Trigger")
+    trigger_row = st.columns(4)
+    trigger_row[0].metric("Recent Events", format_int(summary["training_events"]))
+    trigger_row[1].metric(
+        "Submitted Pipelines",
+        format_int(summary["submitted_training_runs"]),
+    )
+    trigger_row[2].metric("Rejected Files", format_int(summary["rejected_training_runs"]))
+    trigger_row[3].metric(
+        "Latest Event",
+        format_timestamp(summary["latest_training_event"]),
+    )
+
+    if not training_runs.empty:
+        display_runs = training_runs.copy()
+        display_runs["created_at"] = display_runs["created_at"].map(format_timestamp)
+        run_columns = [
+            "created_at",
+            "status",
+            "row_count",
+            "file_uri",
+            "pipeline_job_name",
+            "candidate_output_prefix",
+            "message",
+        ]
+        run_columns = [
+            column for column in run_columns
+            if column in display_runs.columns
+        ]
+        st.dataframe(
+            display_runs[run_columns],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No training trigger runs have been recorded yet.")
+
+
 def main() -> None:
     (
         scored_customers,
@@ -557,12 +754,29 @@ def main() -> None:
         source_error,
     ) = load_data()
     freshness, freshness_error = cached_pipeline_freshness()
+    champion_metadata, metadata_error, training_runs, training_runs_error = (
+        cached_model_ops()
+    )
 
     st.title("Telco Customer Churn Prediction Dashboard")
     st.caption("Cloud Run dashboard backed by BigQuery scored churn predictions.")
 
-    overview_tab, customers_tab, impact_tab, drivers_tab, pipeline_tab = st.tabs(
-        ["Overview", "Customers", "Business Impact", "Model Drivers", "Pipeline"]
+    (
+        overview_tab,
+        customers_tab,
+        impact_tab,
+        drivers_tab,
+        pipeline_tab,
+        model_ops_tab,
+    ) = st.tabs(
+        [
+            "Overview",
+            "Customers",
+            "Business Impact",
+            "Model Drivers",
+            "Pipeline",
+            "Model Ops",
+        ]
     )
 
     with overview_tab:
@@ -585,6 +799,14 @@ def main() -> None:
 
     with pipeline_tab:
         render_pipeline(freshness, freshness_error)
+
+    with model_ops_tab:
+        render_model_ops(
+            champion_metadata,
+            metadata_error,
+            training_runs,
+            training_runs_error,
+        )
 
 
 if __name__ == "__main__":
